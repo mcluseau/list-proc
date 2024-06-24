@@ -55,6 +55,10 @@ pub async fn serve(
     let _ = std::fs::remove_file(&socket_path);
     let listener = net::UnixListener::bind(socket_path.clone())?;
 
+    scopeguard::defer! {
+        let _ = std::fs::remove_file(&socket_path);
+    };
+
     let (item_tx, item_rx) = async_channel::unbounded();
 
     // we want to count so read all items and fill the queue
@@ -99,12 +103,11 @@ pub async fn serve(
                     info!("interrupted, stopping clients");
                     stop.store(true, Ordering::Relaxed);
                     if clients.is_empty() {
-                        let _ = std::fs::remove_file(&socket_path);
-                        std::process::exit(0);
+                        return Ok(());
                     }
                 } else {
                     info!("interrupted again, exiting immediately");
-                    std::process::exit(0);
+                    return Ok(());
                 }
             },
             accept_result = listener.accept() => {
@@ -156,18 +159,12 @@ pub async fn serve(
 
                 info!("{n_done} done, {n_failed} failed, {n_todo} total | {}", clients.values().map(|v| v.to_string()).collect::<Vec<_>>().join(" "));
 
-                let finished = if stop.load(Ordering::Relaxed) {
+                if stop.load(Ordering::Relaxed) {
                     info!("all clients are stopped");
-                    true
+                    return Ok(());
                 } else if n_done+n_failed == n_todo && clients.is_empty() {
                     info!("all items have been processed");
-                    true
-                } else {
-                    false
-                };
-                if finished {
-                    let _ = std::fs::remove_file(&socket_path);
-                    std::process::exit(0);
+                    return Ok(());
                 }
             }
         );
