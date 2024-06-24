@@ -1,8 +1,10 @@
 use anyhow::format_err;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::collections::{BTreeMap as Map, BTreeSet as Set};
 use std::fs;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net;
 use tokio::sync::mpsc;
@@ -82,6 +84,7 @@ pub async fn serve(
 
     use tokio::signal::unix::{signal, SignalKind};
     let mut signals = signal(SignalKind::interrupt())?;
+    let stop = Arc::new(AtomicBool::new(false));
 
     let mut clients: Map<u32, ClientStatus> = Map::new();
     let mut n_failed = 0;
@@ -92,11 +95,21 @@ pub async fn serve(
     loop {
         tokio::select!(
             _ = signals.recv() => {
-                info!("interrupted, exiting");
-                std::process::exit(0); // FIXME wait/close clients, etc
+                if stop.load(Ordering::Relaxed) == false {
+                    info!("interrupted, stopping clients");
+                    stop.store(true, Ordering::Relaxed);
+                    if clients.is_empty() {
+                        let _ = std::fs::remove_file(&socket_path);
+                        std::process::exit(0);
+                    }
+                } else {
+                    info!("interrupted again, exiting immediately");
+                    std::process::exit(0);
+                }
             },
             accept_result = listener.accept() => {
                 let (stream, _) = accept_result?;
+
                 let id = next_id;
                 next_id += 1;
 
@@ -104,9 +117,10 @@ pub async fn serve(
 
                 let item_rx = item_rx.clone();
                 let events_tx = events_tx.clone();
+                let stop = stop.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_stream(id, stream, item_rx, &events_tx).await {
-                        println!("{id}| stream error: {e}");
+                    if let Err(e) = handle_stream(id, stream, item_rx, &events_tx, stop).await {
+                        warn!("client {id} failed: {e}");
                     }
                     events_tx.send(ClientEvent::Closed{id}).await.unwrap();
                 });
@@ -133,14 +147,25 @@ pub async fn serve(
                         n_failed += 1;
                     },
                     ClientEvent::Closed{id} => {
+                        if let Some(ClientStatus::Processing(_)) = clients.get(&id) {
+                            n_failed += 1;
+                        }
                         clients.remove(&id);
                     },
                 };
 
                 info!("{n_done} done, {n_failed} failed, {n_todo} total | {}", clients.values().map(|v| v.to_string()).collect::<Vec<_>>().join(" "));
 
-                if n_done+n_failed == n_todo && clients.is_empty() {
+                let finished = if stop.load(Ordering::Relaxed) {
+                    info!("all clients are stopped");
+                    true
+                } else if n_done+n_failed == n_todo && clients.is_empty() {
                     info!("all items have been processed");
+                    true
+                } else {
+                    false
+                };
+                if finished {
                     let _ = std::fs::remove_file(&socket_path);
                     std::process::exit(0);
                 }
@@ -154,6 +179,7 @@ async fn handle_stream(
     mut stream: net::UnixStream,
     queue: async_channel::Receiver<Vec<u8>>,
     events_tx: &mpsc::Sender<ClientEvent>,
+    stop: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     info!("{id}| new client connected");
 
@@ -163,6 +189,24 @@ async fn handle_stream(
     let mut resp = Vec::new();
 
     loop {
+        if stop.load(Ordering::Relaxed) {
+            debug!("{id}| stopped");
+            return Ok(());
+        }
+
+        resp.clear();
+        reader.read_until(b'\n', &mut resp).await?;
+        match resp.as_slice() {
+            b"next\n" => {}
+            b"" => {
+                return Ok(());
+            }
+            r => {
+                info!("{id}| invalid request: {:?}", String::from_utf8_lossy(r));
+                return Ok(());
+            }
+        }
+
         let Ok(mut item) = queue.recv().await else {
             debug!("{id}| queue finished");
             return Ok(());
@@ -185,9 +229,7 @@ async fn handle_stream(
 
         resp.clear();
         reader.read_until(b'\n', &mut resp).await?;
-
-        let resp = resp.as_slice();
-        match resp {
+        match resp.as_slice() {
             b"done\n" => {
                 debug!("{id}| item {item_str:?} done");
                 events_tx.send(ClientEvent::Done { id }).await?;
@@ -196,8 +238,8 @@ async fn handle_stream(
                 debug!("{id}| item {item_str:?} done");
                 events_tx.send(ClientEvent::Failed { id }).await?;
             }
-            _ => {
-                info!("{id}| invalid reply: {:?}", String::from_utf8_lossy(resp));
+            r => {
+                info!("{id}| invalid reply: {:?}", String::from_utf8_lossy(r));
                 return Ok(());
             }
         }

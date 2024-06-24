@@ -1,5 +1,7 @@
 use anyhow::format_err;
 use log::{error, info};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net;
 
@@ -14,10 +16,31 @@ pub async fn process(
     let (stream_in, stream_out) = stream.split();
     stream_out.writable().await?;
 
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut signals = signal(SignalKind::interrupt())?;
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            signals.recv().await.unwrap();
+            info!("interrupted, stopping after current task");
+            stop.store(true, Ordering::Relaxed);
+            signals.recv().await.unwrap();
+            info!("interrupted again, exiting immediately");
+            std::process::exit(0);
+        });
+    }
+
     let mut reader = BufReader::new(stream_in);
 
     let mut item = Vec::new();
     loop {
+        if stop.load(Ordering::Relaxed) {
+            info!("stopped");
+            std::process::exit(0);
+        }
+
+        stream_out.try_write(b"next\n")?;
         item.clear();
         if reader
             .read_until(b'\n', &mut item)
