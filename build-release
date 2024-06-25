@@ -1,6 +1,6 @@
 set -ex
 
-docker run --rm --user=$UID \
+docker run --rm -it --user=$UID \
     -v $HOME/.cargo/registry:/usr/local/cargo/registry \
     -v $PWD:/src -w /src \
     docker.io/rust:1.79-bullseye \
