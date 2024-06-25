@@ -5,9 +5,11 @@ use std::fs;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net;
 use tokio::sync::mpsc;
+
+use crate::config::Config;
 
 enum ClientEvent {
     Take { id: u32, item: Vec<u8> },
@@ -34,6 +36,7 @@ pub async fn serve(
     socket_path: String,
     list_file: String,
     state_file: Option<String>,
+    cfg: Config,
 ) -> anyhow::Result<()> {
     let mut done: Set<Vec<u8>> = Set::new();
 
@@ -90,6 +93,12 @@ pub async fn serve(
     let mut signals = signal(SignalKind::interrupt())?;
     let stop = Arc::new(AtomicBool::new(false));
 
+    // pre-serialize the config line
+    let mut cfg =
+        serde_json::to_vec(&cfg).map_err(|e| format_err!("failed to serialize config: {e}"))?;
+    cfg.push(b'\n');
+    let cfg = Arc::new(cfg);
+
     let mut clients: Map<u32, ClientStatus> = Map::new();
     let mut n_failed = 0;
 
@@ -120,9 +129,11 @@ pub async fn serve(
 
                 let item_rx = item_rx.clone();
                 let events_tx = events_tx.clone();
+                let cfg = cfg.clone();
                 let stop = stop.clone();
+
                 tokio::spawn(async move {
-                    if let Err(e) = handle_stream(id, stream, item_rx, &events_tx, stop).await {
+                    if let Err(e) = handle_stream(id, stream, item_rx, &events_tx, cfg, stop).await {
                         warn!("client {id} failed: {e}");
                     }
                     events_tx.send(ClientEvent::Closed{id}).await.unwrap();
@@ -176,11 +187,14 @@ async fn handle_stream(
     mut stream: net::UnixStream,
     queue: async_channel::Receiver<Vec<u8>>,
     events_tx: &mpsc::Sender<ClientEvent>,
+    cfg: Arc<Vec<u8>>,
     stop: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     info!("{id}| new client connected");
 
-    let (stream_in, stream_out) = stream.split();
+    let (stream_in, mut stream_out) = stream.split();
+
+    stream_out.write(cfg.as_slice()).await?;
 
     let mut reader = BufReader::new(stream_in);
     let mut resp = Vec::new();
@@ -221,8 +235,7 @@ async fn handle_stream(
 
         debug!("{id}| sending item: {item_str:?}");
 
-        stream_out.writable().await?;
-        stream_out.try_write(item.as_slice())?;
+        stream_out.write(item.as_slice()).await?;
 
         resp.clear();
         reader.read_until(b'\n', &mut resp).await?;

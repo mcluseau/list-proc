@@ -1,12 +1,14 @@
 use clap::{Parser, Subcommand};
 
 mod client;
+mod config;
 mod server;
+use config::Config;
 
 #[derive(Parser)]
 #[command()]
 struct Cli {
-    #[arg(short, long, default_value = "list-proc.sock")]
+    #[arg(short, long = "socket", default_value = "list-proc.sock")]
     socket_path: String,
     #[command(subcommand)]
     command: Commands,
@@ -16,17 +18,17 @@ struct Cli {
 enum Commands {
     /// Serve a list of items
     Serve {
-        list_file: String,
+        #[arg(long = "state")]
         state_file: Option<String>,
-    },
-    /// Process a list of items distributed by a list-proc server
-    Process {
         #[arg(long, default_value = "item")]
         env: String,
+        list_file: String,
         cmd: String,
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Process a list of items distributed by a list-proc server
+    Process {},
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -42,9 +44,15 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Serve {
-            list_file,
             state_file,
-        } => server::serve(socket_path, list_file, state_file).await,
-        Commands::Process { env, cmd, args } => client::process(socket_path, env, cmd, args).await,
+            env,
+            list_file,
+            cmd,
+            args,
+        } => {
+            let cfg = Config { env, cmd, args };
+            server::serve(socket_path, list_file, state_file, cfg).await
+        }
+        Commands::Process {} => client::process(socket_path).await,
     }
 }

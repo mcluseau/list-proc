@@ -2,19 +2,15 @@ use anyhow::format_err;
 use log::{error, info};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net;
 
-pub async fn process(
-    socket_path: String,
-    env: String,
-    cmd: String,
-    args: Vec<String>,
-) -> anyhow::Result<()> {
+use crate::config::Config;
+
+pub async fn process(socket_path: String) -> anyhow::Result<()> {
     info!("connecting to {socket_path}");
     let mut stream = net::UnixStream::connect(socket_path).await?;
-    let (stream_in, stream_out) = stream.split();
-    stream_out.writable().await?;
+    let (stream_in, mut stream_out) = stream.split();
 
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -34,13 +30,21 @@ pub async fn process(
     let mut reader = BufReader::new(stream_in);
 
     let mut item = Vec::new();
+
+    reader
+        .read_until(b'\n', &mut item)
+        .await
+        .map_err(|e| format_err!("failed to read config: {e}"))?;
+    let cfg: Config =
+        serde_json::from_slice(item.as_slice()).map_err(|e| format_err!("invalid config: {e}"))?;
+
     loop {
         if stop.load(Ordering::Relaxed) {
             info!("stopped");
             std::process::exit(0);
         }
 
-        stream_out.try_write(b"next\n")?;
+        stream_out.write(b"next\n").await?;
         item.clear();
         if reader
             .read_until(b'\n', &mut item)
@@ -57,25 +61,29 @@ pub async fn process(
         let item_str = String::from_utf8_lossy(item);
         info!("received item: {item_str:?}");
 
-        let mut cmd = tokio::process::Command::new(cmd.clone());
-        cmd.args(args.clone());
+        let cfg = cfg.clone();
+        let mut cmd = tokio::process::Command::new(cfg.cmd);
+        cmd.args(cfg.args);
 
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
-        cmd.env(env.clone(), OsString::from_vec(item.to_vec()));
+        cmd.env(cfg.env, OsString::from_vec(item.to_vec()));
 
         let result = cmd
             .status()
             .await
             .map_err(|e| format_err!("failed to run command: {e}"))?;
 
-        if result.success() {
+        let status = if result.success() {
             info!("item {item_str:?}: {result}");
-            stream_out.try_write(b"done\n")
+            b"done\n".as_slice()
         } else {
             error!("item {item_str:?}: {result}");
-            stream_out.try_write(b"failed\n")
-        }
-        .map_err(|e| format_err!("failed to send result: {e}"))?;
+            b"failed\n".as_slice()
+        };
+        stream_out
+            .write(status)
+            .await
+            .map_err(|e| format_err!("failed to send result: {e}"))?;
     }
 }
