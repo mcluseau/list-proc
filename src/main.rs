@@ -28,7 +28,10 @@ enum Commands {
         args: Vec<String>,
     },
     /// Process a list of items distributed by a list-proc server
-    Process {},
+    Process {
+        #[arg(short)]
+        n_items: Option<u32>,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -53,6 +56,6 @@ async fn main() -> anyhow::Result<()> {
             let cfg = Config { env, cmd, args };
             server::serve(socket_path, list_file, state_file, cfg).await
         }
-        Commands::Process {} => client::process(socket_path).await,
+        Commands::Process { n_items } => client::process(socket_path, n_items).await,
     }
 }

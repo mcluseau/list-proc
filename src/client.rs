@@ -7,7 +7,7 @@ use tokio::net;
 
 use crate::config::Config;
 
-pub async fn process(socket_path: String) -> anyhow::Result<()> {
+pub async fn process(socket_path: String, n_items: Option<u32>) -> anyhow::Result<()> {
     info!("connecting to {socket_path}");
     let mut stream = net::UnixStream::connect(socket_path).await?;
     let (stream_in, mut stream_out) = stream.split();
@@ -30,6 +30,7 @@ pub async fn process(socket_path: String) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream_in);
 
     let mut item = Vec::new();
+    let mut n_done = 0;
 
     reader
         .read_until(b'\n', &mut item)
@@ -85,5 +86,10 @@ pub async fn process(socket_path: String) -> anyhow::Result<()> {
             .write(status)
             .await
             .map_err(|e| format_err!("failed to send result: {e}"))?;
+
+        n_done += 1;
+        if n_items.is_some_and(|n_items| n_done >= n_items) {
+            return Ok(());
+        }
     }
 }
