@@ -7,7 +7,11 @@ use tokio::net;
 
 use crate::config::Config;
 
-pub async fn process(socket_path: String, n_items: Option<u32>) -> anyhow::Result<()> {
+pub async fn process(
+    socket_path: String,
+    n_items: Option<u32>,
+    exit_on_error: bool,
+) -> anyhow::Result<()> {
     info!("connecting to {socket_path}");
     let mut stream = net::UnixStream::connect(socket_path).await?;
     let (stream_in, mut stream_out) = stream.split();
@@ -89,6 +93,10 @@ pub async fn process(socket_path: String, n_items: Option<u32>) -> anyhow::Resul
 
         n_done += 1;
         if n_items.is_some_and(|n_items| n_done >= n_items) {
+            return Ok(());
+        }
+
+        if exit_on_error && !result.success() {
             return Ok(());
         }
     }

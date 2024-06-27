@@ -18,19 +18,28 @@ struct Cli {
 enum Commands {
     /// Serve a list of items
     Serve {
+        /// Path to the state file
         #[arg(long = "state")]
         state_file: Option<String>,
+        /// Name of the envvar set to the current item
         #[arg(long, default_value = "item")]
         env: String,
+        /// File used as a list
         list_file: String,
+        /// Command to run
         cmd: String,
+        /// Args to the command to run
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
     /// Process a list of items distributed by a list-proc server
     Process {
+        /// Number of items to process (default: unlimited)
         #[arg(short)]
         n_items: Option<u32>,
+        /// Exit on error
+        #[arg(short = 'e', default_value = "false")]
+        exit_on_error: bool,
     },
 }
 
@@ -56,6 +65,9 @@ async fn main() -> anyhow::Result<()> {
             let cfg = Config { env, cmd, args };
             server::serve(socket_path, list_file, state_file, cfg).await
         }
-        Commands::Process { n_items } => client::process(socket_path, n_items).await,
+        Commands::Process {
+            n_items,
+            exit_on_error,
+        } => client::process(socket_path, n_items, exit_on_error).await,
     }
 }
