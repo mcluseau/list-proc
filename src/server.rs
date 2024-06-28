@@ -121,7 +121,7 @@ pub async fn serve(
         tokio::select!(
             _ = signals.recv() => {
                 if server.signal_stop() {
-                    return Ok(());
+                    break;
                 }
             },
             accept_result = listener.accept() => {
@@ -134,10 +134,16 @@ pub async fn serve(
             }
             event = events_rx.recv() => {
                 if server.recv_event(event.unwrap())? {
-                    return Ok(());
+                    break;
                 }
             }
         );
+    }
+
+    if server.counters.n_failed == 0 {
+        Ok(())
+    } else {
+        Err(format_err!("{} failed", server.counters.n_failed))
     }
 }
 
