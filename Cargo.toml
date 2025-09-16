@@ -3,6 +3,12 @@ name = "list-proc"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+opt-level = "s"
+lto = true
+debug = false
+panic = "abort"
+
 [dependencies]
 anyhow = "1.0.86"
 async-channel = "2.3.1"
